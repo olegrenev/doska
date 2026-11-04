@@ -1,0 +1,10 @@
+__pycache__/
+build/
+dist/
+_pi_env/
+_tools/
+*.spec
+gh.zip
+Doska.iconset/
+Doska.icns
+test_out.png

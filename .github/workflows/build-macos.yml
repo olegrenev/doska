@@ -1,0 +1,53 @@
+name: build-macos
+
+on:
+  push:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: pip install PySide6 pyinstaller pillow
+
+      - name: Build .icns icon
+        run: |
+          python - <<'EOF'
+          from PIL import Image
+          import os
+          os.makedirs("Doska.iconset", exist_ok=True)
+          img = Image.open("doska_icon.ico").convert("RGBA")
+          for size in (16, 32, 128, 256, 512):
+              for scale, suffix in ((1, ""), (2, "@2x")):
+                  r = size * scale
+                  if r > 1024:
+                      continue
+                  img.resize((r, r), Image.LANCZOS).save(
+                      f"Doska.iconset/icon_{size}x{size}{suffix}.png")
+          EOF
+          iconutil -c icns Doska.iconset -o Doska.icns
+
+      - name: Build app
+        run: >-
+          pyinstaller --noconfirm --onefile --windowed
+          --name "Doska-3.1"
+          --icon Doska.icns
+          --add-data "doska_icon.ico:."
+          doska_qt.py
+
+      - name: Package
+        run: |
+          cd dist
+          ditto -c -k --sequesterRsrc --keepParent "Doska-3.1.app" "Doska-3.1-macos-arm64.zip"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Doska-3.1-macos-arm64
+          path: dist/Doska-3.1-macos-arm64.zip
