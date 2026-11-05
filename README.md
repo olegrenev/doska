@@ -72,6 +72,29 @@ Runs 256 headless checks (Qt offscreen platform).
 
 MIT — see [LICENSE](LICENSE).
 
+## Code signing policy
+
+Free code signing provided by [SignPath.io](https://signpath.io),
+certificate by SignPath Foundation — **application pending**.
+
+Until the application is approved, Windows binaries are unsigned and
+SmartScreen may show an "Unknown publisher" warning (More info →
+Run anyway).
+
+- **What will be signed:** `Doska-*.exe` published on GitHub Releases.
+- **Build & signing:** artifacts are built from this repository with
+  GitHub Actions / PyInstaller; only CI-built artifacts are submitted for
+  signing; the private key is held by SignPath (HSM-backed) and never
+  stored in this project.
+- **Roles (single maintainer):** author, reviewer and signing approver —
+  [@olegrenev](https://github.com/olegrenev). External pull requests are
+  reviewed before merge; every signing request requires manual approval.
+
+## Privacy
+
+Doska does not collect, store or transfer any user data. It runs fully
+offline; nothing is sent over the network.
+
 ---
 
 # Doska (Доска) — по-русски
@@ -135,3 +158,14 @@ python test_doska.py
 ## Лицензия
 
 MIT — см. [LICENSE](LICENSE).
+
+## Подпись кода
+
+Заявка на бесплатную подпись через SignPath Foundation подана
+(см. английский раздел выше). Пока exe не подписан, SmartScreen может
+показывать предупреждение «Неизвестный издатель».
+
+## Конфиденциальность
+
+Doska не собирает и никуда не передаёт данные пользователя, работает
+полностью офлайн.
