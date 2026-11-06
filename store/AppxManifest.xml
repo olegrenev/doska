@@ -1,0 +1,63 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Манифест MSIX-пакета Doska для Microsoft Store.
+
+  ПЕРЕД СБОРКОЙ заменить три заполнителя значениями из Partner Center
+  (раздел "Product identity" вашего приложения):
+    {{PACKAGE_NAME}}  — Package/Identity/Name, например 12345OlegRenev.Doska
+    {{PUBLISHER}}     — Package/Identity/Publisher, например CN=AAAA-BBBB-...
+    {{PUBLISHER_DISPLAY}} — отображаемое имя издателя, например Oleg Renev
+-->
+<Package xmlns="http://schemas.microsoft.com/appx/manifest/foundation/windows10"
+         xmlns:uap="http://schemas.microsoft.com/appx/manifest/uap/windows10"
+         xmlns:desktop="http://schemas.microsoft.com/appx/manifest/desktop/windows10"
+         xmlns:rescap="http://schemas.microsoft.com/appx/manifest/foundation/windows10/restrictedcapabilities"
+         IgnorableNamespaces="uap desktop rescap">
+
+  <Identity Name="{{PACKAGE_NAME}}"
+            Version="3.1.0.0"
+            Publisher="{{PUBLISHER}}"
+            ProcessorArchitecture="x64" />
+
+  <Properties>
+    <DisplayName>Doska</DisplayName>
+    <PublisherDisplayName>{{PUBLISHER_DISPLAY}}</PublisherDisplayName>
+    <Logo>Assets\StoreLogo.png</Logo>
+    <Description>Doska — белборд с поддержкой графических планшетов</Description>
+  </Properties>
+
+  <Resources>
+    <Resource Language="ru-RU" />
+    <Resource Language="en-US" />
+  </Resources>
+
+  <Dependencies>
+    <TargetDeviceFamily Name="Windows.Desktop"
+                        MinVersion="10.0.17763.0"
+                        MaxVersionTested="10.0.26100.0" />
+  </Dependencies>
+
+  <Capabilities>
+    <rescap:Capability Name="runFullTrust" />
+  </Capabilities>
+
+  <Applications>
+    <Application Id="Doska" Executable="Doska-3.1.exe"
+                 EntryPoint="Windows.FullTrustApplication">
+      <uap:VisualElements DisplayName="Doska"
+                          Description="Whiteboard with graphics tablet support"
+                          Square150x150Logo="Assets\Square150x150Logo.png"
+                          Square44x44Logo="Assets\Square44x44Logo.png"
+                          BackgroundColor="transparent">
+        <uap:DefaultTile Wide310x150Logo="Assets\Wide310x150Logo.png"
+                         Square310x310Logo="Assets\Square310x310Logo.png"
+                         Square71x71Logo="Assets\Square71x71Logo.png" />
+      </uap:VisualElements>
+      <Extensions>
+        <desktop:Extension Category="windows.fullTrustProcess"
+                           Executable="Doska-3.1.exe" />
+      </Extensions>
+    </Application>
+  </Applications>
+
+</Package>

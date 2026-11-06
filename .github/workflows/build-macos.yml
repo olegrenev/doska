@@ -1,8 +1,19 @@
 name: build-macos
 
+# Ручной запуск: Actions → build-macos → Run workflow.
+# Автоповтор: каждый день в 03:17 UTC (наименее загруженное время —
+# в США ночь), пока ARM-раннер не освободится. Неудачная попытка
+# (отмена по нехватке мощностей) ничего не ломает — просто ждём
+# следующий запуск. Успешная сборка появится в артефактах прогона.
+
 on:
-  push:
   workflow_dispatch:
+  schedule:
+    - cron: "17 3 * * *"
+
+concurrency:
+  group: macos-arm-build
+  cancel-in-progress: false
 
 jobs:
   build:
