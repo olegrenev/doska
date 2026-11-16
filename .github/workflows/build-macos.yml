@@ -6,6 +6,9 @@ name: build-macos
 on:
   workflow_dispatch:
 
+permissions:
+  contents: write
+
 concurrency:
   group: macos-arm-build
   cancel-in-progress: false
@@ -53,7 +56,21 @@ jobs:
           cd dist
           ditto -c -k --sequesterRsrc --keepParent "Doska-3.2.app" "Doska-3.2-macos-arm64.zip"
 
+      - name: Verify native Apple Silicon executable
+        run: |
+          test "$(lipo -archs "dist/Doska-3.2.app/Contents/MacOS/Doska-3.2")" = "arm64"
+
       - uses: actions/upload-artifact@v4
         with:
           name: Doska-3.2-macos-arm64
           path: dist/Doska-3.2-macos-arm64.zip
+
+      # Публикация происходит на GitHub и не зависит от локального наблюдения.
+      - name: Publish macOS release asset
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: >-
+          gh release upload v3.2
+          dist/Doska-3.2-macos-arm64.zip
+          --repo olegrenev/doska
+          --clobber
