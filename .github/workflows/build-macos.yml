@@ -23,7 +23,7 @@ jobs:
 
       - uses: actions/setup-python@v5
         with:
-          python-version: "3.12"
+          python-version: "3.22"
 
       - name: Install dependencies
         run: pip install PySide6 pyinstaller pillow
@@ -48,7 +48,7 @@ jobs:
       - name: Build app
         run: >-
           pyinstaller --noconfirm --onefile --windowed
-          --name "Doska-3.1"
+          --name "Doska-3.2"
           --icon Doska.icns
           --add-data "doska_icon.ico:."
           doska_qt.py
@@ -56,9 +56,9 @@ jobs:
       - name: Package
         run: |
           cd dist
-          ditto -c -k --sequesterRsrc --keepParent "Doska-3.1.app" "Doska-3.1-macos-arm64.zip"
+          ditto -c -k --sequesterRsrc --keepParent "Doska-3.2.app" "Doska-3.2-macos-arm64.zip"
 
       - uses: actions/upload-artifact@v4
         with:
-          name: Doska-3.1-macos-arm64
-          path: dist/Doska-3.1-macos-arm64.zip
+          name: Doska-3.2-macos-arm64
+          path: dist/Doska-3.2-macos-arm64.zip

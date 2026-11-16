@@ -27,20 +27,26 @@
 - Ctrl+Z — отмена, Ctrl+Y — повтор, Ctrl+C/Ctrl+V — копировать/вставить
   выделенные записи; если в буфере обмена появляется внешнее
   изображение, оно замещает скопированное выделение;
-  Ctrl+S — сохранить PNG, Ctrl+N — очистить;
+  Ctrl+S — сохранить сессию .doska, Ctrl+Shift+S — сохранить как,
+  Ctrl+O — открыть сессию, Ctrl+E — экспорт PNG, Ctrl+N — очистить;
 - клавиши 1–4 — цвета; толщина — кнопками на панели;
 - курсор показывает выбранный цвет и толщину кисти.
 """
 
+import base64
 import ctypes
 from ctypes import wintypes
+import json
 import math
 import os
 import re
 import sys
 import time
+import zlib
 
-from PySide6.QtCore import QPoint, QPointF, QRectF, QSizeF, Qt, QTimer
+from PySide6.QtCore import (
+    QByteArray, QBuffer, QEvent, QIODevice, QPoint, QPointF, QRectF, QSizeF, Qt, QTimer,
+)
 from PySide6.QtGui import (
     QColor, QCursor, QFont, QFontMetricsF, QGuiApplication, QIcon, QImage,
     QKeySequence, QPainter, QPainterPath, QPen, QPixmap, QPolygonF,
@@ -50,11 +56,12 @@ from PySide6.QtWidgets import (
     QApplication, QComboBox, QColorDialog, QDialog, QDialogButtonBox,
     QFileDialog, QHBoxLayout, QInputDialog, QLabel, QMainWindow,
     QMessageBox, QPlainTextEdit, QToolBar, QPushButton, QRadioButton,
-    QVBoxLayout, QWidget,
+    QVBoxLayout, QWidget, QScrollArea, QMenu, QToolTip,
 )
 
 SCENE_W, SCENE_H = 16000, 12000   # рабочая зона
 TILE = 512                        # размер плитки слоя штрихов
+TILE_PAD = 2                      # кайма плитки: швы AA на стыках не видны
 GRID_STEP = 40
 GRID_COLOR = QColor("#dcdcdc")
 BG_COLOR = QColor("white")
@@ -74,10 +81,10 @@ ZOOM_MIN, ZOOM_MAX = 0.1, 5.0
 
 STROKE_KINDS = ("stroke", "line", "axes", "curve", "text")  # в плиточных слоях
 
-DEFAULT_COLOR = QColor("#1a1a1a")
+DEFAULT_COLOR = QColor("#2b5fd9")  # синий — кнопка 3, порядок цветов прежний
 DEFAULT_WIDTH = 5
 
-VERSION = "3.1"
+VERSION = "3.2"
 
 QUICK_COLORS = [
     ("1", "#1a1a1a"),
@@ -522,14 +529,23 @@ _TEX_IGNORE = {"left", "right", "big", "Big", "bigg", "Bigg",
 _FONT_CACHE = {}
 
 
-def _tex_font(px):
+def _tex_font(px, italic=False):
     px = max(4, int(round(px)))
-    f = _FONT_CACHE.get(px)
+    key = (px, italic)
+    f = _FONT_CACHE.get(key)
     if f is None:
         f = QFont()
         f.setPixelSize(px)
-        _FONT_CACHE[px] = f
+        f.setItalic(italic)
+        _FONT_CACHE[key] = f
     return f
+
+
+def _tex_node_font(text, px):
+    """Переменные (одиночные латинские буквы) — курсивом, как в TeX;
+    цифры, знаки и многобуквенные фрагменты — прямым шрифтом."""
+    italic = len(text) == 1 and text.isascii() and text.isalpha()
+    return _tex_font(px, italic)
 
 
 def _tex_tokenize(s):
@@ -552,6 +568,13 @@ def _tex_tokenize(s):
             toks.append((ch, ch))
             i += 1
         elif ch == " ":
+            i += 1
+        elif ch == "-":
+            # настоящий минус U+2212 с пробелами вокруг, а не дефис
+            toks.append(("ch", " − "))
+            i += 1
+        elif ch in "+=":
+            toks.append(("ch", " " + ch + " "))
             i += 1
         else:
             toks.append(("ch", ch))
@@ -626,7 +649,7 @@ def _tex_measure(nodes, px):
 def _tex_measure1(nd, px):
     typ = nd[0]
     if typ == "t":
-        fm = QFontMetricsF(_tex_font(px))
+        fm = QFontMetricsF(_tex_node_font(nd[1], px))
         return fm.horizontalAdvance(nd[1]), fm.ascent(), fm.descent()
     if typ == "grp":
         return _tex_measure(nd[1], px)
@@ -665,7 +688,7 @@ def _tex_draw_run(painter, nodes, x, y, px):
 def _tex_draw1(painter, nd, x, y, px):
     typ = nd[0]
     if typ == "t":
-        f = _tex_font(px)
+        f = _tex_node_font(nd[1], px)
         painter.setFont(f)
         painter.drawText(QPointF(x, y), nd[1])
         return QFontMetricsF(f).horizontalAdvance(nd[1])
@@ -740,8 +763,8 @@ class TextDialog(QDialog):
         lay.addWidget(self.edit)
         row = QHBoxLayout()
         self.radio_plain = QRadioButton("Обычный текст")
-        self.radio_plain.setChecked(True)
         self.radio_latex = QRadioButton("LaTeX")
+        self.radio_latex.setChecked(True)  # LaTeX — режим по умолчанию
         row.addWidget(self.radio_plain)
         row.addWidget(self.radio_latex)
         row.addStretch(1)
@@ -786,6 +809,63 @@ def _smooth_points(pts, passes=1):
     return pts
 
 
+def _join_segments(segs):
+    """Склеить короткие отрезки marching squares в длинные ломаные по
+    общим концам. Нужно и для пунктира (на отрезках 2–4 px штрихи
+    пунктира просто не видны), и для скорости отрисовки."""
+    from collections import defaultdict
+    segs = [s for s in segs if len(s) >= 2]
+
+    def key(p):
+        return (round(p[0], 3), round(p[1], 3))
+
+    adj = defaultdict(list)
+    for i, s in enumerate(segs):
+        adj[key(s[0])].append((i, 0))
+        adj[key(s[-1])].append((i, 1))
+    used = [False] * len(segs)
+    out = []
+    for i in range(len(segs)):
+        if used[i]:
+            continue
+        used[i] = True
+        chain = list(segs[i])
+        for direction in (0, 1):   # 0 — наращиваем конец, 1 — начало
+            while True:
+                pt = chain[-1] if direction == 0 else chain[0]
+                found = None
+                for j, end in adj.get(key(pt), ()):
+                    if not used[j]:
+                        found = (j, end)
+                        break
+                if found is None:
+                    break
+                j, end = found
+                used[j] = True
+                s = segs[j]
+                if direction == 0:
+                    pts = s if end == 0 else list(reversed(s))
+                    chain.extend(pts[1:])
+                else:
+                    pts = s if end == 1 else list(reversed(s))
+                    chain[:0] = pts[:-1]
+        out.append(chain)
+    return out
+
+
+def _poly_lengths(polys):
+    """Смещения начал ломаных в общей длине кривой — для непрерывной
+    фазы пунктира при переходе от одной ломаной к другой."""
+    offs = []
+    total = 0.0
+    for poly in polys:
+        offs.append(total)
+        for i in range(1, len(poly)):
+            total += math.hypot(poly[i][0] - poly[i - 1][0],
+                                poly[i][1] - poly[i - 1][1])
+    return offs
+
+
 class StrokeLayer:
     """Слой штрихов из плиток TILE x TILE: память только под исписанные участки."""
 
@@ -796,7 +876,7 @@ class StrokeLayer:
         key = (tx, ty)
         pm = self.tiles.get(key)
         if pm is None:
-            pm = QPixmap(TILE, TILE)
+            pm = QPixmap(TILE + 2 * TILE_PAD, TILE + 2 * TILE_PAD)
             pm.fill(Qt.GlobalColor.transparent)
             self.tiles[key] = pm
         return pm
@@ -815,7 +895,10 @@ class StrokeLayer:
                 pm = self._tile(tx, ty)
                 p = QPainter(pm)
                 p.setRenderHint(QPainter.RenderHint.Antialiasing, True)
-                p.translate(-tx * TILE, -ty * TILE)
+                # кайма TILE_PAD: край плитки не является краем устройства
+                # для растеризатора, поэтому антиалиасинг на стыках плиток
+                # не даёт белых горизонтальных/вертикальных волосных линий
+                p.translate(TILE_PAD - tx * TILE, TILE_PAD - ty * TILE)
                 draw_fn(p)
                 p.end()
 
@@ -879,6 +962,8 @@ class Canvas(QWidget):
         self.offset = QPointF(0, 0)
 
         self.entries = []       # документ в порядке создания
+        self._axes_ref = None   # начало координат последних осей (для графиков)
+        self.session_path = None  # текущий файл .doska для Ctrl+S
         self.undo_stack = []
         self.redo_stack = []
         self.layers = []        # [{'kind':'strokes','tl':StrokeLayer,'entries':[...]} | {'kind':'image','entry':e}]
@@ -899,6 +984,8 @@ class Canvas(QWidget):
         self.cursor_scene = QPointF(200, 200)
         self.drag = None
         self._pan_last = None
+        self._pan_start = None    # старт ПКМ-движения (клик vs панорама)
+        self._pan_dist = 0.0      # суммарный сдвиг при ПКМ-панораме
         self.selected_image = None
         self.selected_entries = []
         self.clipboard_entries = []  # внутренний буфер для Ctrl+C/Ctrl+V
@@ -960,6 +1047,18 @@ class Canvas(QWidget):
     def reset_view(self):
         self.zoom = 1.0
         self.center_view()
+
+    def _zoom_two_cells(self):
+        """Масштаб 200% (клетка вдвое крупнее) с сохранением центра вида —
+        применяется при добавлении осей и построении графиков."""
+        if abs(self.zoom - 2.0) < 1e-9:
+            return
+        cx = self.offset.x() + self.width() / (2 * self.zoom)
+        cy = self.offset.y() + self.height() / (2 * self.zoom)
+        self.zoom = 2.0
+        self.offset = QPointF(cx - self.width() / (2 * self.zoom),
+                              cy - self.height() / (2 * self.zoom))
+        self._clamp_offset()
 
     # ---------- слои ----------
 
@@ -1328,11 +1427,19 @@ class Canvas(QWidget):
         for layer in self.layers:
             if layer["kind"] == "strokes":
                 tiles = layer["tl"].tiles
+                # Выводим плитку вместе с каймой: интерполяции доступны
+                # настоящие пиксели за внутренней границей, а не прозрачный
+                # край обрезанного источника, дающий белый волосной шов.
                 for tx in range(tx0, tx1 + 1):
                     for ty in range(ty0, ty1 + 1):
                         pm = tiles.get((tx, ty))
                         if pm is not None:
-                            p.drawPixmap(tx * TILE, ty * TILE, pm)
+                            p.drawPixmap(
+                                QRectF(tx * TILE - TILE_PAD,
+                                       ty * TILE - TILE_PAD,
+                                       TILE + 2 * TILE_PAD,
+                                       TILE + 2 * TILE_PAD),
+                                pm, QRectF(pm.rect()))
             else:
                 self._draw_image(p, layer["entry"])
 
@@ -1445,6 +1552,27 @@ class Canvas(QWidget):
         self._pen_diag(pressure, is_eraser)
 
         contact = pressure > 0.0
+        # После undo, открытия диалога или перестройки слоёв WinTab иногда
+        # продолжает присылать пакеты старого контакта. Если внутренний режим
+        # уже сброшен, точки уходили в несуществующий активный штрих, и перо
+        # молчало до рамки выделения (она вызывала общий _finish_input).
+        # Обнаруживаем рассинхронизацию до обработки точки и начинаем жест
+        # заново; корректные resize/rotate/erase/line/circle не затрагиваются.
+        stale = self._wt_mode is not None and (
+            self.mode != self._wt_mode
+            or (self._wt_mode == "stroke"
+                and (self._active_tl is None or not self.cur_points)))
+        if stale:
+            self._wt_mode = None
+            self.mode = None
+            self.cur_points = []
+            self._live = []
+            self._active_tl = None
+            self.line_anchor = None
+            self._erase_group = None
+            self._rebuild_layers()
+            if not contact:
+                return
         if contact and self._wt_mode == "stroke" and pressure < PRESS_MIN_DRAW:
             # почти оторванное перо завершает штрих, а не дописывает хвост
             self._finish_input(pos)
@@ -1657,13 +1785,22 @@ class Canvas(QWidget):
             return
 
         if btn == Qt.MouseButton.RightButton:
-            if self.eraser_tool or self._stroke_at(pos):
+            sel_hit = (
+                (self.selected_image is not None
+                 and self._image_at(pos) is self.selected_image)
+                or any(self._bbox_contains(self._eb(e), pos)
+                       for e in self.selected_entries))
+            if self.eraser_tool or (self._stroke_at(pos) and not sel_hit):
                 self.mode = "erase"
                 self._begin_erase()
                 self.erase_at(pos)
             else:
+                # пустое место или выделенный объект: панорама при движении,
+                # короткий клик без движения — контекстное меню
                 self.mode = "pan"
                 self._pan_last = event.position()
+                self._pan_start = event.position()
+                self._pan_dist = 0.0
             return
 
         if btn == Qt.MouseButton.LeftButton:
@@ -1740,6 +1877,7 @@ class Canvas(QWidget):
             return
         if self.mode == "pan":
             delta = event.position() - self._pan_last
+            self._pan_dist += abs(delta.x()) + abs(delta.y())
             self._pan_last = event.position()
             self.offset -= delta / self.zoom
             self._clamp_offset()
@@ -2048,10 +2186,43 @@ class Canvas(QWidget):
     def mouseReleaseEvent(self, event):
         if self._pen_emulation():
             return
+        if (event.button() == Qt.MouseButton.RightButton
+                and self.mode == "pan" and self._pan_start is not None
+                and self._pan_dist < 6.0):
+            # короткий ПКМ-клик (не панорама) — контекстное меню
+            self._show_context_menu(event.globalPosition().toPoint())
         self._finish_input(self._to_scene(event.position()))
 
     def mouseDoubleClickEvent(self, event):
         pass
+
+    # ---------- контекстное меню (короткий ПКМ-клик) ----------
+
+    def _build_context_menu(self):
+        menu = QMenu(self)
+        a_copy = menu.addAction("Копировать (Ctrl+C)")
+        a_paste = menu.addAction("Вставить (Ctrl+V)")
+        a_del = menu.addAction("Удалить (Del)")
+        has_sel = (bool(self.selected_entries)
+                   or self.selected_image is not None)
+        a_copy.setEnabled(has_sel)
+        a_del.setEnabled(has_sel)
+        clip = QGuiApplication.clipboard()
+        mime = clip.mimeData()
+        a_paste.setEnabled(bool(self.clipboard_entries)
+                           or not clip.image().isNull()
+                           or mime.hasImage() or mime.hasUrls())
+        return menu, a_copy, a_paste, a_del
+
+    def _show_context_menu(self, global_pos):
+        menu, a_copy, a_paste, a_del = self._build_context_menu()
+        chosen = menu.exec(global_pos)
+        if chosen is a_copy:
+            self.copy_selected()
+        elif chosen is a_paste:
+            self.paste()
+        elif chosen is a_del:
+            self.delete_selected()
 
     # ---------- клавиша Q (линия-стрелка) ----------
 
@@ -2113,7 +2284,12 @@ class Canvas(QWidget):
         if pressure <= 0:
             return 1.0
         # нормальное письмо (~50% нажатия) = толщина мыши
-        return min(1.0, 0.3 + 1.4 * pressure)
+        f = min(1.0, 0.3 + 1.4 * pressure)
+        if pressure < 0.25:
+            # слабые нажатия (хвост росчерка, почти оторванное перо)
+            # дополнительно ослабляем на 30%: конец линии менее заметен
+            f *= 0.7
+        return f
 
     def _stroke_add_point(self, pos, factor):
         raw = self.cur_points
@@ -2283,6 +2459,8 @@ class Canvas(QWidget):
         self._circle_center_fixed = None
         self.drag = None
         self._pan_last = None
+        self._pan_start = None
+        self._pan_dist = 0.0
         self._erase_group = None
         self._sel_anchor = None
         self._move_last = None
@@ -2667,7 +2845,10 @@ class Canvas(QWidget):
 
     def add_axes(self):
         """Вставить координатные оси: начало — в ближайшем узле сетки,
-        чтобы деления на осях совпадали с клетками фона."""
+        чтобы деления на осях совпадали с клетками фона.
+        Оси сразу создаются набором отдельных линий (оси, стрелки,
+        деления): каждый элемент можно выделить и удалить по отдельности."""
+        self._zoom_two_cells()
         vw = self.width() / self.zoom
         vh = self.height() / self.zoom
         cx = float(round((self.offset.x() + vw / 2) / GRID_STEP) * GRID_STEP)
@@ -2677,11 +2858,15 @@ class Canvas(QWidget):
         entry = {"kind": "axes", "center": QPointF(cx, cy),
                  "hw": hw, "hh": hh,
                  "color": QColor(self.color), "width": 2.0}
-        self.entries.append(entry)
-        self._push_undo(("add", entry))
+        # мета-запись с началом координат для графиков; в документ не идёт
+        self._axes_ref = entry
+        parts = self._axes_to_lines(entry)
+        self.entries.extend(parts)
+        self._push_undo(("add_many", parts))
         layer = self._ensure_stroke_layer()
-        layer["entries"].append(entry)
-        self._render_entry_to_layer(layer["tl"], entry)
+        layer["entries"].extend(parts)
+        for le in parts:
+            self._render_entry_to_layer(layer["tl"], le)
         self.update()
         self.window().statusBar().showMessage(
             "Оси добавлены в центр вида · Ctrl+Z — убрать", 3000)
@@ -2776,12 +2961,14 @@ class Canvas(QWidget):
                 f"Ошибка в формуле «{formula}»: {exc.msg}", 4000)
             return False
 
+        self._zoom_two_cells()
         # система координат: последние добавленные оси, иначе центр вида
-        ax = None
-        for e in reversed(self.entries):
-            if e["kind"] == "axes":
-                ax = e
-                break
+        ax = self._axes_ref
+        if ax is None:
+            for e in reversed(self.entries):
+                if e["kind"] == "axes":
+                    ax = e
+                    break
         if ax is not None:
             cx, cy = ax["center"].x(), ax["center"].y()
             hw, hh = ax["hw"], ax["hh"]
@@ -2832,9 +3019,14 @@ class Canvas(QWidget):
                 f"График не построен — проверьте формулу: {formula}", 4000)
             return False
 
+        if implicit is not None:
+            segments = _join_segments(segments)
         entry = {"kind": "curve", "segs": segments,
                  "color": QColor(self.color), "width": self.pen_width,
                  "dash": self.dashed_lines}
+        if entry["dash"]:
+            # фаза пунктира идёт непрерывно по всем ломаным кривой
+            entry["seg_off"] = _poly_lengths(segments)
         self.entries.append(entry)
         self._push_undo(("add", entry))
         layer = self._ensure_stroke_layer()
@@ -3062,6 +3254,233 @@ class Canvas(QWidget):
         self.window().statusBar().showMessage(
             "Доска очищена · Ctrl+Z — вернуть", 4000)
 
+    # ---------- сессия .doska: DSK1 + zlib(JSON), без pickle ----------
+
+    @staticmethod
+    def _sr(value, digits=2):
+        value = round(float(value), digits)
+        return 0.0 if value == 0 else value
+
+    @classmethod
+    def _session_encode_entry(cls, e):
+        """Компактное JSON-представление записи; QPixmap — PNG в base64."""
+        k = e["kind"]
+        out = {}
+        if "color" in e:
+            out["c"] = QColor(e["color"]).name()
+        if "width" in e:
+            out["w"] = cls._sr(e["width"], 3)
+        if k == "stroke":
+            out.update(k="s", p=[cls._sr(v, 3 if i % 3 == 2 else 2)
+                                 for pt in e["pts"] for i, v in enumerate(pt)])
+        elif k == "line":
+            out.update(k="l",
+                       a=[cls._sr(e["p1"].x()), cls._sr(e["p1"].y())],
+                       b=[cls._sr(e["p2"].x()), cls._sr(e["p2"].y())])
+            if e.get("dash"):
+                out["d"] = 1
+            if e.get("dash_off"):
+                out["o"] = cls._sr(e["dash_off"], 3)
+            if e.get("arrow"):
+                out["r"] = 1
+        elif k == "curve":
+            out.update(k="v", s=[[[cls._sr(x), cls._sr(y)] for x, y in seg]
+                                 for seg in e["segs"]])
+            if e.get("dash"):
+                out["d"] = 1
+            if e.get("seg_off"):
+                out["o"] = [cls._sr(v, 3) for v in e["seg_off"]]
+        elif k == "text":
+            out.update(k="t", p=[cls._sr(e["pos"].x()), cls._sr(e["pos"].y())],
+                       x=e["text"], z=cls._sr(e["size"], 2),
+                       l=1 if e.get("latex") else 0)
+        elif k == "axes":
+            out.update(k="a", p=[cls._sr(e["center"].x()), cls._sr(e["center"].y())],
+                       h=[cls._sr(e["hw"]), cls._sr(e["hh"])])
+        elif k == "image":
+            orig = e.get("orig", e["pix"])
+            data = QByteArray()
+            buf = QBuffer(data)
+            if not buf.open(QIODevice.OpenModeFlag.WriteOnly) or not orig.save(buf, "PNG"):
+                raise ValueError("Не удалось закодировать изображение")
+            buf.close()
+            out.update(k="i", p=[cls._sr(e["pos"].x()), cls._sr(e["pos"].y())],
+                       s=[e["pix"].width(), e["pix"].height()],
+                       a=cls._sr(e.get("angle", 0.0), 3),
+                       d=base64.b64encode(bytes(data)).decode("ascii"))
+        else:
+            raise ValueError(f"Неизвестный тип записи: {k}")
+        return out
+
+    @staticmethod
+    def _session_decode_entry(d):
+        if not isinstance(d, dict):
+            raise ValueError("Повреждена запись сессии")
+        k = d.get("k")
+        col = QColor(d.get("c", "#1a1a1a"))
+        if not col.isValid():
+            raise ValueError("Повреждён цвет записи")
+        if k == "s":
+            flat = d["p"]
+            if len(flat) % 3:
+                raise ValueError("Повреждены точки штриха")
+            pts = [tuple(float(v) for v in flat[i:i + 3])
+                   for i in range(0, len(flat), 3)]
+            if not pts:
+                raise ValueError("Пустой штрих в файле")
+            return {"kind": "stroke", "pts": pts, "color": col,
+                    "width": float(d["w"])}
+        if k == "l":
+            return {"kind": "line", "p1": QPointF(*d["a"]),
+                    "p2": QPointF(*d["b"]), "color": col,
+                    "width": float(d["w"]), "dash": bool(d.get("d")),
+                    "dash_off": float(d.get("o", 0.0)),
+                    "arrow": bool(d.get("r"))}
+        if k == "v":
+            segs = [[(float(x), float(y)) for x, y in seg] for seg in d["s"]]
+            return {"kind": "curve", "segs": segs, "color": col,
+                    "width": float(d["w"]), "dash": bool(d.get("d")),
+                    "seg_off": [float(v) for v in d.get("o", [])]}
+        if k == "t":
+            return {"kind": "text", "pos": QPointF(*d["p"]),
+                    "text": str(d["x"]), "size": float(d["z"]),
+                    "latex": bool(d.get("l")), "color": col}
+        if k == "a":
+            return {"kind": "axes", "center": QPointF(*d["p"]),
+                    "hw": float(d["h"][0]), "hh": float(d["h"][1]),
+                    "color": col, "width": float(d["w"])}
+        if k == "i":
+            try:
+                raw = base64.b64decode(d["d"], validate=True)
+            except Exception as exc:
+                raise ValueError("Повреждено изображение") from exc
+            orig = QPixmap()
+            if not orig.loadFromData(raw, "PNG") or orig.isNull():
+                raise ValueError("Не удалось прочитать изображение")
+            w, h = int(d["s"][0]), int(d["s"][1])
+            if w <= 0 or h <= 0:
+                raise ValueError("Некорректный размер изображения")
+            pix = (orig if (orig.width(), orig.height()) == (w, h)
+                   else orig.scaled(w, h, Qt.AspectRatioMode.IgnoreAspectRatio,
+                                    Qt.TransformationMode.SmoothTransformation))
+            return {"kind": "image", "orig": orig, "pix": pix,
+                    "pos": QPointF(*d["p"]), "angle": float(d.get("a", 0.0))}
+        raise ValueError(f"Неизвестный тип записи в файле: {k}")
+
+    def _session_document(self):
+        return {
+            "app": "Doska", "version": 1,
+            "view": {"zoom": self._sr(self.zoom, 5),
+                     "offset": [self._sr(self.offset.x()), self._sr(self.offset.y())]},
+            "axes": (self._session_encode_entry(self._axes_ref)
+                     if self._axes_ref is not None else None),
+            "entries": [self._session_encode_entry(e) for e in self.entries],
+        }
+
+    def save_session(self, path=None):
+        """Ctrl+S: сохранить в текущий .doska или спросить имя впервые."""
+        if not isinstance(path, (str, os.PathLike)) or not path:
+            path = self.session_path
+        if not path:
+            return self.save_session_as()
+        path = os.path.abspath(os.fspath(path))
+        try:
+            doc = self._session_document()
+            raw = json.dumps(doc, ensure_ascii=False,
+                             separators=(",", ":"), allow_nan=False).encode("utf-8")
+            payload = b"DSK1" + zlib.compress(raw, 9)
+            tmp = path + ".tmp"
+            with open(tmp, "wb") as f:
+                f.write(payload)
+            os.replace(tmp, path)
+        except Exception as exc:
+            try:
+                if os.path.exists(path + ".tmp"):
+                    os.remove(path + ".tmp")
+            except OSError:
+                pass
+            QMessageBox.critical(self, "Ошибка сохранения", str(exc))
+            return False
+        self.session_path = path
+        self.window().statusBar().showMessage(f"Сессия сохранена: {path}", 5000)
+        return True
+
+    def save_session_as(self, path=None):
+        if not isinstance(path, (str, os.PathLike)) or not path:
+            initial = self.session_path or "доска.doska"
+            path, _ = QFileDialog.getSaveFileName(
+                self, "Сохранить сессию как", initial,
+                "Сессия Доски (*.doska)")
+        if not path:
+            return False
+        path = os.fspath(path)
+        if not path.lower().endswith(".doska"):
+            path += ".doska"
+        return self.save_session(path)
+
+    def open_session(self, path=None):
+        """Ctrl+O: загрузить документ и вид; undo/redo начинаются заново."""
+        interactive = not isinstance(path, (str, os.PathLike))
+        if interactive:
+            path, _ = QFileDialog.getOpenFileName(
+                self, "Открыть сессию", self.session_path or "",
+                "Сессия Доски (*.doska)")
+        if not path:
+            return False
+        path = os.path.abspath(os.fspath(path))
+        if interactive and self.entries:
+            answer = QMessageBox.question(
+                self, "Открыть сессию",
+                "Заменить текущую доску содержимым файла?\n"
+                "Несохранённые изменения будут потеряны.")
+            if answer != QMessageBox.StandardButton.Yes:
+                return False
+        try:
+            with open(path, "rb") as f:
+                payload = f.read()
+            if not payload.startswith(b"DSK1"):
+                raise ValueError("Это не файл сессии Доски (.doska)")
+            dec = zlib.decompressobj()
+            raw = dec.decompress(payload[4:], 128 * 1024 * 1024)
+            if dec.unconsumed_tail or not dec.eof:
+                raise ValueError("Файл сессии слишком велик или повреждён")
+            doc = json.loads(raw.decode("utf-8"))
+            if doc.get("app") != "Doska" or doc.get("version") != 1:
+                raise ValueError("Неподдерживаемая версия файла сессии")
+            entries = [self._session_decode_entry(d) for d in doc["entries"]]
+            axes_data = doc.get("axes")
+            axes = (self._session_decode_entry(axes_data)
+                    if axes_data is not None else None)
+        except Exception as exc:
+            if interactive:
+                QMessageBox.critical(self, "Ошибка открытия", str(exc))
+                return False
+            raise
+
+        self.entries = entries
+        self._axes_ref = axes
+        view = doc.get("view", {})
+        self.zoom = max(ZOOM_MIN, min(ZOOM_MAX, float(view.get("zoom", 1.0))))
+        off = view.get("offset", [0.0, 0.0])
+        self.offset = QPointF(float(off[0]), float(off[1]))
+        self._clamp_offset()
+        self.undo_stack.clear()
+        self.redo_stack.clear()
+        self._bbox_cache.clear()
+        self.selected_image = None
+        self.selected_entries = []
+        self.mode = None
+        self._wt_mode = None
+        self.cur_points = []
+        self._live = []
+        self.line_anchor = None
+        self._erase_group = None
+        self.session_path = path
+        self._rebuild_layers()
+        self.update()
+        self.window().statusBar().showMessage(f"Сессия открыта: {path}", 5000)
+        return True
+
     def save_png(self, path=None):
         if not self.entries:
             self.window().statusBar().showMessage("Доска пуста", 3000)
@@ -3241,26 +3660,34 @@ class MainWindow(QMainWindow):
         tb = QToolBar("Инструменты")
         tb.setMovable(False)
         self.addToolBar(tb)
+        self.main_toolbar = tb
 
-        for key, col in QUICK_COLORS:
+        color_names = ("Чёрный", "Красный", "Синий", "Зелёный")
+        self.color_buttons = []
+        for (key, col), name in zip(QUICK_COLORS, color_names):
             btn = QPushButton(key)
             btn.setFixedWidth(28)
+            btn.setToolTip("Выбор цвета")
             btn.setStyleSheet(
                 f"background-color: {col}; color: white; font-weight: bold;")
             btn.clicked.connect(
                 lambda _=False, c=col: self.canvas.set_color(QColor(c)))
             tb.addWidget(btn)
+            self.color_buttons.append(btn)
 
-        pick = QPushButton("Цвет…")
+        pick = QPushButton("Цвет… (5)")
+        pick.setToolTip("Выбрать другой цвет (5)")
         pick.clicked.connect(self._pick_color)
         tb.addWidget(pick)
 
         tb.addSeparator()
         tb.addWidget(QLabel(" Толщина: "))
         self.width_buttons = {}
-        for w in (2, 3, 5, 8, 12, 16):
+        for w, hk in ((2, "F2"), (3, "F3"), (5, "F4"),
+                      (8, "F5"), (12, "F6"), (16, "F7")):
             btn = QPushButton(f"{w:g}")
-            btn.setFixedWidth(32)
+            btn.setFixedWidth(38)
+            btn.setToolTip(f"Толщина линии {w:g} px ({hk})")
             btn.clicked.connect(lambda _=False, v=w: self._set_width(v))
             self.width_buttons[float(w)] = btn
             tb.addWidget(btn)
@@ -3269,13 +3696,14 @@ class MainWindow(QMainWindow):
         tb.addSeparator()
         # группа: ластик и очистка
         self.eraser_btn = QPushButton("Ластик (E)")
+        self.eraser_btn.setToolTip("Ластик (E)")
         self.eraser_btn.setCheckable(True)
         self.eraser_btn.toggled.connect(self.canvas.set_eraser_tool)
         tb.addWidget(self.eraser_btn)
         clear_btn = QPushButton("Очистить")
-        clear_btn.setToolTip("Ctrl+N")
+        clear_btn.setToolTip("Очистить доску (Ctrl+N)")
         clear_btn.clicked.connect(self.canvas.clear)
-        tb.addWidget(clear_btn)
+        split_action = tb.addWidget(clear_btn)
 
         tb.addSeparator()
         # группа: режим ЛКМ, пунктир, сетка
@@ -3290,14 +3718,14 @@ class MainWindow(QMainWindow):
         self.dash_btn = QPushButton("Пунктир")
         self.dash_btn.setCheckable(True)
         self.dash_btn.setToolTip(
-            "Прямые линии (Shift), окружности и графики рисуются пунктиром")
+            "Пунктир (D): прямые линии (Shift), окружности и графики")
         self.dash_btn.toggled.connect(self._toggle_dash)
         tb.addWidget(self.dash_btn)
 
         self.grid_btn = QPushButton("Сетка")
         self.grid_btn.setCheckable(True)
         self.grid_btn.setChecked(True)
-        self.grid_btn.setToolTip("Показывать/скрывать фоновую сетку")
+        self.grid_btn.setToolTip("Показывать/скрывать фоновую сетку (G)")
         self.grid_btn.toggled.connect(self._toggle_grid)
         tb.addWidget(self.grid_btn)
 
@@ -3313,12 +3741,12 @@ class MainWindow(QMainWindow):
 
         axes_btn = QPushButton("Оси")
         axes_btn.setToolTip(
-            "Координатные оси в центре вида (начало — в узле сетки)")
+            "Координатные оси (A): центр вида, начало — в узле сетки")
         axes_btn.clicked.connect(self.canvas.add_axes)
         tb.addWidget(axes_btn)
         graph_btn = QPushButton("График")
         graph_btn.setToolTip(
-            "График f(x) по формуле: x — в клетках от начала координат")
+            "График (P): f(x) по формуле, x — в клетках от начала координат")
         graph_btn.clicked.connect(lambda: self.canvas.add_graph())
         tb.addWidget(graph_btn)
         self.graph_btn = graph_btn
@@ -3330,19 +3758,58 @@ class MainWindow(QMainWindow):
         tb.addWidget(text_btn)
 
         tb.addSeparator()
-        # группа: справка
+        # группа: справка и файлы сессии
         self.info_btn = QPushButton("Информация")
         self.info_btn.setToolTip(
             "Описание всех возможностей и горячих клавиш (F1)")
         self.info_btn.clicked.connect(self._show_help)
         tb.addWidget(self.info_btn)
 
+        self.save_btn = QPushButton("Сохранить")
+        self.save_btn.setToolTip("Сохранить сессию в текущий файл .doska (Ctrl+S)")
+        self.save_btn.clicked.connect(self.canvas.save_session)
+        tb.addWidget(self.save_btn)
+        self.save_as_btn = QPushButton("Сохранить как")
+        self.save_as_btn.setToolTip("Выбрать новый файл сессии .doska (Ctrl+Shift+S)")
+        self.save_as_btn.clicked.connect(self.canvas.save_session_as)
+        tb.addWidget(self.save_as_btn)
+        self.open_btn = QPushButton("Открыть")
+        self.open_btn.setToolTip("Открыть ранее сохранённую сессию .doska (Ctrl+O)")
+        self.open_btn.clicked.connect(self.canvas.open_session)
+        tb.addWidget(self.open_btn)
+
+        # Сначала все действия принадлежат одной панели. При нехватке места
+        # вторая группа переносится во вторую строку; на широком экране
+        # вторая панель скрыта, а порядок инструментов остаётся неизменным.
+        self._toolbar_actions = list(tb.actions())
+        for action in self._toolbar_actions:
+            widget = tb.widgetForAction(action)
+            if isinstance(widget, QPushButton):
+                # QToolBar может обрабатывать подсказку QAction вместо
+                # подсказки вложенной кнопки — дублируем её на действие.
+                action.setToolTip(widget.toolTip())
+                action.setStatusTip(widget.toolTip())
+                widget.setAttribute(Qt.WidgetAttribute.WA_AlwaysShowToolTips, True)
+                widget.installEventFilter(self)
+        self._toolbar_split_index = self._toolbar_actions.index(split_action) + 1
+        tb.layout().activate()
+        self._toolbar_required_width = tb.sizeHint().width() + 20
+        self.addToolBarBreak(Qt.ToolBarArea.TopToolBarArea)
+        self.second_toolbar = QToolBar("Построения и файлы")
+        self.second_toolbar.setMovable(False)
+        self.addToolBar(self.second_toolbar)
+        self._toolbar_two_rows = None
+        self._update_toolbar_layout()
+
         for key, slot in (
             ("Ctrl+Z", self.canvas.undo),
             ("Ctrl+Y", self.canvas.redo),
             ("Ctrl+C", self.canvas.copy_selected),
             ("Ctrl+V", self.canvas.paste),
-            ("Ctrl+S", self.canvas.save_png),
+            ("Ctrl+S", self.canvas.save_session),
+            ("Ctrl+Shift+S", self.canvas.save_session_as),
+            ("Ctrl+O", self.canvas.open_session),
+            ("Ctrl+E", self.canvas.save_png),
             ("Ctrl+N", self.canvas.clear),
             ("Ctrl+A", self.canvas.select_all),
             ("Ctrl+0", self.canvas.reset_view),
@@ -3361,6 +3828,21 @@ class MainWindow(QMainWindow):
         sc = QShortcut(QKeySequence("T"), self)
         sc.activated.connect(lambda: self.canvas.add_text())
 
+        for key, slot in (
+            ("D", lambda: self.dash_btn.toggle()),
+            ("G", lambda: self.grid_btn.toggle()),
+            ("A", self.canvas.add_axes),
+            ("P", lambda: self.canvas.add_graph()),
+            ("5", self._pick_color),
+        ):
+            sc = QShortcut(QKeySequence(key), self)
+            sc.activated.connect(slot)
+
+        for w, hk in ((2, "F2"), (3, "F3"), (5, "F4"),
+                      (8, "F5"), (12, "F6"), (16, "F7")):
+            sc = QShortcut(QKeySequence(hk), self)
+            sc.activated.connect(lambda v=w: self._set_width(v))
+
         sc = QShortcut(QKeySequence(Qt.Key.Key_Delete), self)
         sc.activated.connect(self.canvas.delete_selected)
 
@@ -3374,6 +3856,52 @@ class MainWindow(QMainWindow):
 
         self.showMaximized()
         QTimer.singleShot(0, self.canvas.center_view)
+        QTimer.singleShot(0, self._update_toolbar_layout)
+
+    def eventFilter(self, watched, event):
+        if isinstance(watched, QPushButton) and watched.toolTip():
+            # Не ждём системную задержку QEvent.ToolTip: она особенно
+            # заметна при первом наведении и в неактивном окне.
+            if event.type() in (QEvent.Type.HoverEnter, QEvent.Type.Enter):
+                # Без виджета-владельца QToolTip не наследует цветной
+                # styleSheet кнопки: текст остаётся контрастным и читаемым.
+                QToolTip.showText(
+                    watched.mapToGlobal(QPoint(0, watched.height() + 4)),
+                    watched.toolTip())
+                return False
+            # Запасной путь для платформ, где HoverEnter не доставляется.
+            if event.type() == QEvent.Type.ToolTip:
+                # Без виджета-владельца QToolTip не наследует цветной
+                # styleSheet кнопки: текст остаётся контрастным и читаемым.
+                QToolTip.showText(
+                    watched.mapToGlobal(QPoint(0, watched.height() + 4)),
+                    watched.toolTip())
+                return True
+            if event.type() in (QEvent.Type.Leave, QEvent.Type.Hide):
+                QToolTip.hideText()
+        return super().eventFilter(watched, event)
+
+    def _update_toolbar_layout(self):
+        """Одна строка, если все кнопки помещаются; иначе — две."""
+        if not hasattr(self, "_toolbar_actions"):
+            return
+        two_rows = self.width() < self._toolbar_required_width
+        if two_rows == self._toolbar_two_rows:
+            return
+        for action in self._toolbar_actions:
+            self.main_toolbar.removeAction(action)
+            self.second_toolbar.removeAction(action)
+        for i, action in enumerate(self._toolbar_actions):
+            target = (self.second_toolbar
+                      if two_rows and i >= self._toolbar_split_index
+                      else self.main_toolbar)
+            target.addAction(action)
+        self.second_toolbar.setVisible(two_rows)
+        self._toolbar_two_rows = two_rows
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self._update_toolbar_layout()
 
     def _set_width(self, w):
         self.canvas.set_width(w)
@@ -3411,7 +3939,8 @@ class MainWindow(QMainWindow):
 • Цвет — цветные кнопки (клавиши 1–4) или «Цвет…»; толщина — кнопки 2–16.
 Курсор показывает выбранный цвет, а его размер — выбранную толщину.<br>
 • «Текст» (<b>T</b>) — надпись в центре видимой области: в диалоге вводится
-текст, выбирается размер шрифта и режим — обычный текст или LaTeX
+текст, выбирается размер шрифта и режим — LaTeX (по умолчанию)
+или обычный текст
 (подмножество: ^ _ \\frac \\sqrt \\alpha…\\omega \\times \\leq \\infty
 и др.).<br>
 • «Сетка» — показать/скрыть фоновую сетку (влияет и на сохраняемый PNG).</p>
@@ -3444,29 +3973,56 @@ class MainWindow(QMainWindow):
 • <b>Ctrl+0</b> — вернуться в центр доски.</p>
 
 <p><b>Оси и графики</b><br>
-• «Оси» — координатные оси через центр вида: начало в узле сетки,
-деления совпадают с клетками.<br>
-• «График» — график функции или уравнение кривой: <i>sin(x)</i>,
+• «Оси» (<b>A</b>) — координатные оси через центр вида: начало в узле
+сетки, деления совпадают с клетками. Оси сразу состоят из отдельных
+элементов (линии, стрелки, деления) — каждый можно выделить и удалить.
+При добавлении осей и графиков масштаб становится 200%.<br>
+• «График» (<b>P</b>) — график функции или уравнение кривой: <i>sin(x)</i>,
 <i>x^2/10</i>, <i>y = x^2 - 4x + 3</i>, <i>x^2 + y^2 = 25</i>, <i>xy = 4</i>.
 Степень — ^ или **, умножение можно опускать (4x, x(x+1)).
 x и y — в клетках от начала координат последних осей.
 «Пунктир» действует и на графики.</p>
 
+<p><b>Сессии и экспорт</b><br>
+<b>Ctrl+S</b> — сохранить сессию в файл <b>.doska</b>; при первом
+сохранении программа попросит выбрать имя. <b>Ctrl+Shift+S</b> —
+«Сохранить как», <b>Ctrl+O</b> — открыть ранее сохранённую сессию.
+В файле сохраняются записи, изображения, начало координат, масштаб и
+положение вида. После загрузки история отмен начинается заново.<br>
+<b>Ctrl+E</b> — экспортировать занятую часть доски в PNG.</p>
+
 <p><b>Прочее</b><br>
+<b>D</b> — пунктир вкл/выкл · <b>G</b> — сетка вкл/выкл ·
+<b>5</b> — выбор цвета · <b>F2–F7</b> — толщина 2/3/5/8/12/16 ·
+короткий ПКМ-клик (без движения) по выделенному объекту или пустому
+месту — меню «Копировать / Вставить / Удалить».<br>
 <b>M</b> — переключить ЛКМ между выделением и рисованием ·
 <b>Ctrl+Z</b> — отмена · <b>Ctrl+Y</b> — повтор отменённого ·
 <b>Ctrl+C</b>/<b>Ctrl+V</b> — копировать/вставить выделенное ·
-<b>Ctrl+S</b> — сохранить доску в PNG · <b>Ctrl+N</b> — очистить доску ·
-<b>F1</b> — эта справка.</p>
+<b>Ctrl+N</b> — очистить доску · <b>F1</b> — эта справка.</p>
 """
 
     def _show_help(self):
-        msg = QMessageBox(self)
-        msg.setWindowTitle("Доска — справка")
-        msg.setTextFormat(Qt.TextFormat.RichText)
-        msg.setText(self._help_html())
-        msg.setIcon(QMessageBox.Icon.Information)
-        msg.exec()
+        # Обычный QDialog вместо QMessageBox: без системного звука,
+        # а текст прокручивается и помещается на небольших экранах
+        dlg = QDialog(self)
+        dlg.setWindowTitle("Доска — справка")
+        lay = QVBoxLayout(dlg)
+        scroll = QScrollArea(dlg)
+        scroll.setWidgetResizable(True)
+        label = QLabel(self._help_html(), scroll)
+        label.setTextFormat(Qt.TextFormat.RichText)
+        label.setWordWrap(True)
+        label.setMargin(12)
+        scroll.setWidget(label)
+        lay.addWidget(scroll)
+        bb = QDialogButtonBox(QDialogButtonBox.StandardButton.Close, dlg)
+        bb.rejected.connect(dlg.reject)
+        lay.addWidget(bb)
+        avail = self.screen().availableGeometry()
+        dlg.resize(min(780, avail.width() - 60),
+                   min(620, avail.height() - 60))
+        dlg.exec()
 
     def _toggle_mouse_mode(self, on):
         self.canvas.mouse_draw = on

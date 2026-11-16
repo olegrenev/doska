@@ -31,18 +31,21 @@ full graphics-tablet support, math-oriented tools and image embedding.
   deleted (Del), copied (Ctrl+C) and pasted (Ctrl+V) — pasted copies never
   overlap the originals.
 - **Undo / Redo** — Ctrl+Z / Ctrl+Y, including move, resize and rotate.
-- **Export** — save the visible area to PNG with Ctrl+S.
-- **Help** — F1 shows the full feature and hotkey list.
+- **Sessions** — save and reopen the compact `.doska` format with Ctrl+S,
+  Ctrl+Shift+S and Ctrl+O.
+- **Export** — save the visible area to PNG with Ctrl+E.
+- **Help** — F1 shows the full feature and hotkey list in a scrollable window.
 
 ## Download
 
 Prebuilt binaries are on the
 [Releases](https://github.com/olegrenev/doska/releases) page:
 
-- **Windows** — `Doska-3.1.exe`, a single portable file, just run it.
-- **macOS** — `Doska-3.1-macos.zip`. Unzip, then right-click the app →
-  Open (or run `xattr -dr com.apple.quarantine Doska-3.1.app`), because the
-  app is not notarized. Intel build; runs on Apple Silicon via Rosetta 2.
+- **Windows** — `Doska-3.2.exe`, a single portable file, just run it.
+- **macOS (Apple Silicon)** — `Doska-3.2-macos-arm64.zip`. Unzip, then
+  right-click the app → Open (or run
+  `xattr -dr com.apple.quarantine Doska-3.2.app`), because the app is not
+  notarized.
 
 ## Build from source
 
@@ -52,11 +55,11 @@ Requirements: Python 3.10+, PySide6, PyInstaller.
 pip install PySide6 pyinstaller
 
 # Windows
-pyinstaller --noconfirm --onefile --windowed --name "Doska-3.1" \
+pyinstaller --noconfirm --onefile --windowed --name "Doska-3.2" \
     --icon doska_icon.ico --add-data "doska_icon.ico;." doska_qt.py
 
 # macOS (note the ':' separator in --add-data)
-pyinstaller --noconfirm --onefile --windowed --name "Doska-3.1" \
+pyinstaller --noconfirm --onefile --windowed --name "Doska-3.2" \
     --add-data "doska_icon.ico:." doska_qt.py
 ```
 
@@ -66,7 +69,7 @@ pyinstaller --noconfirm --onefile --windowed --name "Doska-3.1" \
 python test_doska.py
 ```
 
-Runs 256 headless checks (Qt offscreen platform).
+Runs 299 headless checks (Qt offscreen platform).
 
 ## License
 
@@ -128,19 +131,22 @@ OpenBoard: большое поле с фоном в клетку, полная �
   между рисованием и выделением/перемещением; выделенное можно двигать,
   удалять (Del), копировать (Ctrl+C) и вставлять (Ctrl+V).
 - **Отмена / повтор** — Ctrl+Z / Ctrl+Y (включая перенос, размер и поворот).
-- **Экспорт** — Ctrl+S сохраняет видимую область в PNG.
-- **Справка** — F1 — полный список возможностей и горячих клавиш.
+- **Сессии** — сохранение и открытие компактных файлов `.doska`:
+  Ctrl+S, Ctrl+Shift+S и Ctrl+O.
+- **Экспорт** — Ctrl+E сохраняет видимую область в PNG.
+- **Справка** — F1 — полный список возможностей и горячих клавиш
+  в прокручиваемом окне.
 
 ## Загрузка
 
 Готовые сборки — на странице
 [Releases](https://github.com/olegrenev/doska/releases):
 
-- **Windows** — `Doska-3.1.exe`, один портативный файл, просто запустите.
-- **macOS** — `Doska-3.1-macos.zip`. Распакуйте и откройте через
-  правый клик → Открыть (или `xattr -dr com.apple.quarantine Doska-3.1.app`),
-  т.к. приложение без нотаризации. Intel-сборка, на Apple Silicon работает
-  через Rosetta 2.
+- **Windows** — `Doska-3.2.exe`, один портативный файл, просто запустите.
+- **macOS (Apple Silicon)** — `Doska-3.2-macos-arm64.zip`. Распакуйте и
+  откройте через правый клик → Открыть (или
+  `xattr -dr com.apple.quarantine Doska-3.2.app`), т.к. приложение без
+  нотаризации.
 
 ## Сборка из исходников
 
@@ -153,7 +159,7 @@ OpenBoard: большое поле с фоном в клетку, полная �
 python test_doska.py
 ```
 
-256 проверок без открытия окна (Qt offscreen).
+299 проверок без открытия окна (Qt offscreen).
 
 ## Лицензия
 

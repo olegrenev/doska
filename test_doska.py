@@ -408,7 +408,8 @@ ok("стрелки убраны", len(c.entries) == 5 and layers_match_entries()
 win.circle_btn.setChecked(True)
 app.processEvents()
 ok("инструмент окружности включён", c.circle_tool)
-ok("кнопка называется «Окружность»", win.circle_btn.text() == "Окружность")
+ok("кнопка называется «Окружность», C — в подсказке",
+   win.circle_btn.text() == "Окружность" and "(C)" in win.circle_btn.toolTip())
 cc = base + QPointF(700, 620)
 mouse_line(cc, cc + QPointF(100, 0), Qt.KeyboardModifier.NoModifier)
 cir = c.entries[-2]
@@ -760,24 +761,33 @@ ok("undo возвращает картинку", e in c.entries and layers_match
 # ---------- 6. координатные оси ----------
 # уводим вид на пустое место, чтобы ластик не задел другие записи
 c.offset = QPointF(2000, 2000)
+c.zoom = 1.0
 c.update()
+_n_ax0 = len(c.entries)
 c.add_axes()
 app.processEvents()
+ok("оси: масштаб стал 200%", abs(c.zoom - 2.0) < 1e-9)
 ok("оси добавлены: начало ровно в узле сетки",
-   c.entries[-1]["kind"] == "axes"
-   and c.entries[-1]["center"].x() % GRID_STEP == 0
-   and c.entries[-1]["center"].y() % GRID_STEP == 0
-   and abs(c.entries[-1]["center"].x() - (c.offset.x() + c.width() / 2)) <= GRID_STEP / 2)
+   c._axes_ref is not None
+   and c._axes_ref["center"].x() % GRID_STEP == 0
+   and c._axes_ref["center"].y() % GRID_STEP == 0
+   and abs(c._axes_ref["center"].x()
+           - (c.offset.x() + c.width() / (2 * c.zoom))) <= GRID_STEP / 2)
+ok("оси — сразу набор отдельных линий, а не единая фигура",
+   len(c.entries) > _n_ax0 + 4
+   and all(en["kind"] == "line" for en in c.entries[_n_ax0:]))
 ok("слой == entries после осей", layers_match_entries())
-ax = c.entries[-1]
+ax = c._axes_ref
 c._wt_hover_last = 0
 c._erase_last = None
 c._erase_speed = 0.0
 ep = ax["center"] + QPointF(100, 0)   # точка на оси X
+_n_er0 = len(c.entries)
 c.erase_at(ep)
 app.processEvents()
-# частичное стирание: оси разложены на линии, кусок оси X вырезан
-ok("ластик частично стёр оси (разложил на линии)", ax not in c.entries)
+# частичное стирание: кусок оси X вырезан, линия разрезана на части
+ok("ластик частично стёр ось X (линия разрезана)",
+   len(c.entries) != _n_er0)
 
 
 ok("рядом с ластиком линий не осталось",
@@ -785,7 +795,8 @@ ok("рядом с ластиком линий не осталось",
 ok("слой == entries после частичного стирания осей", layers_match_entries())
 c.undo()
 app.processEvents()
-ok("undo возвращает оси", ax in c.entries and layers_match_entries())
+ok("undo возвращает ось целиком",
+   len(c.entries) == _n_er0 and layers_match_entries())
 
 # ---------- 7. рамка выделения: выбор, перемещение, Del ----------
 c.offset = QPointF(4000, 4000)
@@ -842,7 +853,7 @@ app.processEvents()
 ok("клик на пустом месте снял выделение", not c.selected_entries)
 
 # ---------- 8. график по формуле ----------
-ax = [e for e in c.entries if e["kind"] == "axes"][-1]
+ax = c._axes_ref
 cxg, cyg = ax["center"].x(), ax["center"].y()
 n_g0 = len(c.entries)
 ok("график y=x построен", c.add_graph("x"))
@@ -960,19 +971,21 @@ ok("отмена диалога ничего не добавляет", len(c.ent
 
 # ---------- 8.6. кнопка «Информация» ----------
 ok("кнопка Информация есть", win.info_btn is not None
-   and win.info_btn.text() == "Информация")
+   and win.info_btn.text() == "Информация"
+   and "F1" in win.info_btn.toolTip())
 _html = win._help_html()
 ok("справка описывает ластик, выделение, изображения, графики",
    all(s in _html for s in ("Ластик", "Ctrl+Z", "Ctrl+V", "Ctrl+колёсико",
                             "Выделение", "Изображения", "Оси", "График",
                             "F1", "задний конец пера")))
-ok("справка содержит номер версии", "3.1" in _html)
+ok("справка содержит номер версии", win.windowTitle().split()[-1] in _html)
 
 ok("по умолчанию ЛКМ — выделение", not c.mouse_draw)
 win.mousemode_btn.setChecked(True)
 app.processEvents()
 ok("переключатель включил рисование ЛКМ",
-   c.mouse_draw and win.mousemode_btn.text() == "ЛКМ: рисует (M)")
+   c.mouse_draw and win.mousemode_btn.text() == "ЛКМ: рисует (M)"
+   and "(M)" in win.mousemode_btn.toolTip())
 n_m0 = len(c.entries)
 mpts = [QPointF(5200 + i * 10, 5200 + i * 3) for i in range(8)]
 c._wt_hover_last = 0
@@ -1319,6 +1332,7 @@ app.processEvents()
 
 # ---------- 8.16. график без осей при zoom out ограничен, а не на весь экран ----------
 c.entries = [en for en in c.entries if en["kind"] != "axes"]
+c._axes_ref = None
 c._rebuild_layers()
 c.zoom = 0.2
 c.offset = QPointF(6000, 4500)
@@ -1329,6 +1343,7 @@ ok("график без осей при zoom 0.2 не разъезжается �
    and (max(px for seg in c.entries[-1]["segs"] for (px, _py) in seg)
         - min(px for seg in c.entries[-1]["segs"] for (px, _py) in seg)) <= 1900
    and layers_match_entries())
+ok("график включил масштаб 200%", abs(c.zoom - 2.0) < 1e-9)
 c.undo()
 app.processEvents()
 c.zoom = 1.0
@@ -1816,6 +1831,299 @@ c.redo_stack.clear()
 app.processEvents()
 ok("слой == entries после теста отмены resize/поворота",
    layers_match_entries())
+
+# ---------- 8.20. новое в 3.2 ----------
+# слабые нажатия ослабляются на 30%, нормальные — как раньше
+ok("слабое нажатие 20%: фактор уменьшен на 30%",
+   abs(c._factor(0.2) - 0.7 * (0.3 + 1.4 * 0.2)) < 1e-9)
+ok("нормальное нажатие 50%: фактор прежний",
+   abs(c._factor(0.5) - 1.0) < 1e-9)
+ok("мышь (нажатие 0): фактор 1", c._factor(0) == 1.0)
+
+# LaTeX: минус — не дефис, переменные — курсивом, режим по умолчанию
+_nodes = doska_qt._tex_parse("a-b")
+ok("LaTeX: минус U+2212 вместо дефиса",
+   any(nd[0] == "t" and "−" in nd[1] for nd in _nodes)
+   and not any(nd[0] == "t" and "-" in nd[1] for nd in _nodes))
+ok("LaTeX: одиночная латинская буква — курсив",
+   doska_qt._tex_node_font("x", 28).italic())
+ok("LaTeX: цифра — прямой шрифт",
+   not doska_qt._tex_node_font("2", 28).italic())
+_dlg32 = TextDialog(win)
+ok("LaTeX — режим по умолчанию в диалоге", _dlg32.is_latex())
+_dlg32.close()
+
+# склейка сегментов marching squares
+_j = doska_qt._join_segments([[(0.0, 0.0), (1.0, 0.0)],
+                              [(1.0, 0.0), (2.0, 0.0)],
+                              [(2.0, 0.0), (2.0, 1.0)]])
+ok("сегменты склеиваются в одну ломаную",
+   len(_j) == 1 and len(_j[0]) == 4)
+
+# пунктир на графике уравнения: длинные ломаные + фаза пунктира
+c.offset = QPointF(3000, 3000)
+c._axes_ref = None
+c.update()
+c.dashed_lines = True
+ok("уравнение окружности строится пунктиром",
+   c.add_graph("x^2 + y^2 = 4"))
+_imp = c.entries[-1]
+ok("пунктирное уравнение: длинные ломаные и seg_off",
+   _imp["kind"] == "curve" and _imp.get("dash")
+   and _imp.get("seg_off") is not None
+   and any(len(seg) > 2 for seg in _imp["segs"])
+   and len(_imp["seg_off"]) == len(_imp["segs"]))
+c.dashed_lines = False
+c.undo()
+app.processEvents()
+
+# контекстное меню: доступность пунктов
+c.selected_entries = []
+c.selected_image = None
+c.clipboard_entries = []
+_m, _ac, _ap, _ad = c._build_context_menu()
+ok("меню без выделения и буфера: копировать/удалить недоступны",
+   not _ac.isEnabled() and not _ad.isEnabled())
+_m.deleteLater()
+c.selected_entries = list(c.entries[-1:])
+_m, _ac, _ap, _ad = c._build_context_menu()
+ok("меню с выделением: копировать/удалить доступны",
+   _ac.isEnabled() and _ad.isEnabled())
+_m.deleteLater()
+c.selected_entries = []
+
+# плитки с каймой против белых линий
+c.offset = QPointF(5000, 5000)
+c.update()
+stroke_pts([QPointF(5100, 5100), QPointF(5300, 5300), QPointF(5500, 5100)])
+_tl32 = c.layers[-1]["tl"]
+ok("плитка слоя имеет защитную кайму TILE_PAD",
+   all(pm.width() == doska_qt.TILE + 2 * doska_qt.TILE_PAD
+       and pm.height() == doska_qt.TILE + 2 * doska_qt.TILE_PAD
+       for pm in _tl32.tiles.values()))
+c.undo()
+app.processEvents()
+
+# ---------- 8.21. сессии, watchdog пера, две строки и вертикальные швы ----------
+ok("по умолчанию выбран синий цвет — кнопка 3",
+   doska_qt.DEFAULT_COLOR.name() == QColor(doska_qt.QUICK_COLORS[2][1]).name()
+   and doska_qt.QUICK_COLORS[2][0] == "3")
+_tbs = win.findChildren(doska_qt.QToolBar)
+ok("клавиши возвращены на цвета, ластик и режим ЛКМ",
+   [btn.text() for btn in win.color_buttons] == ["1", "2", "3", "4"]
+   and win.eraser_btn.text() == "Ластик (E)"
+   and win.mousemode_btn.text().endswith("(M)"))
+ok("у остальных инструментов клавиши только в подсказках",
+   all("(" not in btn.text() for btn in
+       [win.dash_btn, win.grid_btn, win.circle_btn, win.info_btn]
+       + list(win.width_buttons.values()))
+   and "(D)" in win.dash_btn.toolTip()
+   and "(F7)" in win.width_buttons[16.0].toolTip())
+# Проверяем не только текст, но и фактический показ QToolTip по событию.
+from PySide6.QtGui import QHelpEvent
+_tip_btn = win.dash_btn
+_tip_local = QPoint(max(1, _tip_btn.width() // 2),
+                    max(1, _tip_btn.height() // 2))
+_tip_event = QHelpEvent(QEvent.Type.ToolTip, _tip_local,
+                        _tip_btn.mapToGlobal(_tip_local))
+QApplication.sendEvent(_tip_btn, _tip_event)
+app.processEvents()
+ok("подсказка инструмента действительно появляется по событию ToolTip",
+   doska_qt.QToolTip.isVisible()
+   and doska_qt.QToolTip.text() == _tip_btn.toolTip())
+doska_qt.QToolTip.hideText()
+QApplication.sendEvent(_tip_btn, QEvent(QEvent.Type.HoverEnter))
+ok("подсказка появляется сразу при наведении, без системной задержки",
+   doska_qt.QToolTip.isVisible()
+   and doska_qt.QToolTip.text() == _tip_btn.toolTip())
+doska_qt.QToolTip.hideText()
+_color_tips_ok = True
+for _color_btn in win.color_buttons:
+    QApplication.sendEvent(_color_btn, QEvent(QEvent.Type.HoverEnter))
+    _color_tips_ok = (_color_tips_ok and doska_qt.QToolTip.isVisible()
+                      and doska_qt.QToolTip.text() == "Выбор цвета")
+    doska_qt.QToolTip.hideText()
+ok("у всех цветовых кнопок видна подсказка «Выбор цвета»", _color_tips_ok)
+ok("кнопки сессий: короткие подписи и горячие клавиши в подсказках",
+   win.save_btn.text() == "Сохранить"
+   and win.save_as_btn.text() == "Сохранить как"
+   and win.open_btn.text() == "Открыть"
+   and "Ctrl+S" in win.save_btn.toolTip()
+   and "Ctrl+Shift+S" in win.save_as_btn.toolTip()
+   and "Ctrl+O" in win.open_btn.toolTip())
+_old_window_size = win.size()
+win.resize(win._toolbar_required_width + 100, 700)
+app.processEvents()
+ok("на широком экране панель автоматически возвращается в одну строку",
+   not win._toolbar_two_rows and win.second_toolbar.isHidden()
+   and len(win.main_toolbar.actions()) == len(win._toolbar_actions)
+   and not win.second_toolbar.actions())
+win.resize(800, 700)
+app.processEvents()
+ok("на маленьком экране панель автоматически разделяется на две строки",
+   win._toolbar_two_rows and win.second_toolbar.isVisible()
+   and len(win.main_toolbar.actions()) == win._toolbar_split_index
+   and len(win.second_toolbar.actions()) ==
+   len(win._toolbar_actions) - win._toolbar_split_index)
+win.resize(_old_window_size)
+app.processEvents()
+_h32 = win._help_html()
+ok("справка описывает сессии и новый хоткей PNG",
+   ".doska" in _h32 and "Ctrl+Shift+S" in _h32
+   and "Ctrl+O" in _h32 and "Ctrl+E" in _h32)
+
+# Рассинхронизированный WinTab-жест не должен блокировать следующий штрих.
+_before_watchdog = len(c.entries)
+_wp = [QPointF(c.offset.x() + 80 + i * 12, c.offset.y() + 90 + i * 3)
+       for i in range(5)]
+pen_at(_wp[0], 0.6)
+pen_at(_wp[1], 0.6)
+c.mode = None              # внешнее действие сбросило режим
+c._active_tl = None        # активный слой уже перестроен
+c.cur_points = []          # старого незавершённого штриха больше нет
+pen_at(_wp[2], 0.6)        # watchdog должен начать новый жест
+pen_at(_wp[3], 0.6)
+pen_at(_wp[4], 0.6)
+pen_done()
+ok("WinTab восстанавливается после рассинхронизации состояния",
+   len(c.entries) == _before_watchdog + 1
+   and c.entries[-1]["kind"] == "stroke"
+   and c._wt_mode is None and c.mode is None)
+ok("слой == entries после восстановления WinTab", layers_match_entries())
+
+# Полный roundtrip .doska со всеми типами записей и мета-записью осей.
+_old_doc = (c.entries, c._axes_ref, c.zoom, QPointF(c.offset),
+            c.undo_stack, c.redo_stack, c.session_path)
+_base_x, _base_y = 4400.0, 4200.0
+_pix_orig = QPixmap(24, 16)
+_pix_orig.fill(QColor("#d92b2b"))
+_pix_cur = _pix_orig.scaled(48, 32, Qt.AspectRatioMode.IgnoreAspectRatio)
+c.entries = [
+    {"kind": "stroke", "pts": [(_base_x, _base_y, 0.7),
+                                (_base_x + 30, _base_y + 20, 0.9),
+                                (_base_x + 70, _base_y + 10, 1.0)],
+     "color": QColor("#2b5fd9"), "width": 5},
+    {"kind": "line", "p1": QPointF(_base_x, _base_y + 80),
+     "p2": QPointF(_base_x + 120, _base_y + 80),
+     "color": QColor("#d92b2b"), "width": 3,
+     "dash": True, "dash_off": 12.5, "arrow": True},
+    {"kind": "curve", "segs": [[(_base_x, _base_y + 130),
+                                 (_base_x + 40, _base_y + 100),
+                                 (_base_x + 80, _base_y + 130)]],
+     "color": QColor("#2b9e44"), "width": 8,
+     "dash": True, "seg_off": [7.25]},
+    {"kind": "text", "pos": QPointF(_base_x + 150, _base_y + 30),
+     "text": "x^2-y", "size": 28, "latex": True,
+     "color": QColor("#1a1a1a")},
+    {"kind": "axes", "center": QPointF(_base_x + 200, _base_y + 200),
+     "hw": 240, "hh": 160, "color": QColor("#1a1a1a"), "width": 2},
+    {"kind": "image", "orig": _pix_orig, "pix": _pix_cur,
+     "pos": QPointF(_base_x + 180, _base_y + 90), "angle": 30.0},
+]
+c._axes_ref = {"kind": "axes", "center": QPointF(4600, 4400),
+                "hw": 240, "hh": 160, "color": QColor("#1a1a1a"), "width": 2}
+c.zoom = 1.7
+c.offset = QPointF(4300, 4000)
+c.undo_stack = [("dummy", None)]
+c.redo_stack = [("dummy", None)]
+_session_file = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                             "test_session.doska")
+ok("сессия сохраняется в компактный файл .doska", c.save_session(_session_file))
+with open(_session_file, "rb") as _f:
+    _payload = _f.read()
+_uncompressed = doska_qt.json.dumps(
+    c._session_document(), ensure_ascii=False,
+    separators=(",", ":"), allow_nan=False).encode("utf-8")
+ok("формат DSK1 со сжатием JSON",
+   _payload.startswith(b"DSK1") and len(_payload) < len(_uncompressed))
+ok("Ctrl+S повторно сохраняет в текущий файл без диалога",
+   c.save_session() and c.session_path == _session_file)
+_saved_view = (c.zoom, QPointF(c.offset))
+c.entries = []
+c.zoom = 0.5
+c.offset = QPointF(0, 0)
+ok("сессия открывается после замены документа", c.open_session(_session_file))
+ok("roundtrip: порядок и типы всех записей сохранены",
+   [e["kind"] for e in c.entries] ==
+   ["stroke", "line", "curve", "text", "axes", "image"])
+ok("roundtrip: штрих и давление восстановлены",
+   len(c.entries[0]["pts"]) == 3
+   and abs(c.entries[0]["pts"][1][0] - (_base_x + 30)) < 0.011
+   and abs(c.entries[0]["pts"][1][2] - 0.9) < 0.0011)
+ok("roundtrip: пунктир, фаза и стрелка линии восстановлены",
+   c.entries[1]["dash"] and c.entries[1]["arrow"]
+   and abs(c.entries[1]["dash_off"] - 12.5) < 0.0011)
+ok("roundtrip: кривая и смещения пунктира восстановлены",
+   c.entries[2]["dash"] and c.entries[2]["seg_off"] == [7.25]
+   and len(c.entries[2]["segs"][0]) == 3)
+ok("roundtrip: LaTeX-текст и старые оси восстановлены",
+   c.entries[3]["text"] == "x^2-y" and c.entries[3]["latex"]
+   and c.entries[4]["kind"] == "axes")
+_loaded_image = c.entries[5]
+ok("roundtrip: размер, поворот и пиксели изображения восстановлены",
+   (_loaded_image["pix"].width(), _loaded_image["pix"].height()) == (48, 32)
+   and (_loaded_image["orig"].width(), _loaded_image["orig"].height()) == (24, 16)
+   and abs(_loaded_image["angle"] - 30.0) < 0.0011
+   and pix_bytes(_loaded_image["orig"]) == pix_bytes(_pix_orig))
+ok("roundtrip: начало координат и вид восстановлены",
+   c._axes_ref is not None
+   and abs(c._axes_ref["center"].x() - 4600) < 0.011
+   and abs(c.zoom - _saved_view[0]) < 0.00001
+   and (c.offset - _saved_view[1]).manhattanLength() < 0.011)
+ok("загрузка очищает undo/redo и выделение",
+   not c.undo_stack and not c.redo_stack
+   and not c.selected_entries and c.selected_image is None)
+ok("слой == entries после загрузки сессии", layers_match_entries())
+ok("повторное сохранение после открытия использует тот же путь",
+   c.save_session() and c.session_path == _session_file)
+if os.path.exists(_session_file):
+    os.remove(_session_file)
+
+# Возвращаем документ для финального экспортного теста.
+(c.entries, c._axes_ref, c.zoom, c.offset,
+ c.undo_stack, c.redo_stack, c.session_path) = _old_doc
+c.offset = QPointF(c.offset)
+c._bbox_cache.clear()
+c.selected_entries = []
+c.selected_image = None
+c._rebuild_layers()
+app.processEvents()
+
+# Пиксельная регрессия: у шва плиток не должно быть непрерывной полосы
+# отличий от прямого рендера (исходная ошибка давала >100 пикселей).
+_holder = doska_qt.QMainWindow()
+_sc = Canvas(_holder)
+_holder.setCentralWidget(_sc)
+_holder.resize(400, 320)
+_holder.show()
+_sc.show_grid = False
+_sc.zoom = 2.0
+_sc.offset = QPointF(350.37, 350)
+_se = {"kind": "stroke", "pts": [(420, 420, 1.0), (470, 470, 1.0),
+                                  (520, 520, 1.0), (570, 570, 1.0),
+                                  (620, 620, 1.0), (670, 670, 1.0)],
+       "color": QColor("#2b5fd9"), "width": 80}
+_sc.entries = [_se]
+_sc._rebuild_layers()
+app.processEvents()
+_actual = _sc.grab().toImage().convertToFormat(QImage.Format.Format_ARGB32)
+_expected = QImage(_sc.size(), QImage.Format.Format_ARGB32)
+_expected.fill(QColor("white"))
+_p = QPainter(_expected)
+_p.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+_p.scale(_sc.zoom, _sc.zoom)
+_p.translate(-_sc.offset.x(), -_sc.offset.y())
+_sc._render_stroke(_p, _se)
+_p.end()
+_seam_x = round((doska_qt.TILE - _sc.offset.x()) * _sc.zoom)
+_diff_count = 0
+for _y in range(_actual.height()):
+    _a, _b = _actual.pixelColor(_seam_x, _y), _expected.pixelColor(_seam_x, _y)
+    if any(abs(getattr(_a, ch)() - getattr(_b, ch)()) > 2
+           for ch in ("red", "green", "blue", "alpha")):
+        _diff_count += 1
+ok("вертикального шва плиток при zoom 200% нет", _diff_count < 30)
+_holder.close()
 
 # ---------- 9. сохранение PNG (со штрихами, картинкой, осями, графиком) ----------
 out = os.path.join(os.path.dirname(os.path.abspath(__file__)), "test_out.png")

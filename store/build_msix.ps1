@@ -1,4 +1,4 @@
-﻿# build_msix.ps1 — сборка MSIX-пакета Doska для Microsoft Store.
+# build_msix.ps1 — сборка MSIX-пакета Doska для Microsoft Store.
 #
 # Использование (в PowerShell, из папки store):
 #   .\build_msix.ps1 -PackageName "12345OlegRenev.Doska" `
@@ -12,7 +12,7 @@
 #   2. Складывает exe и ресурсы в папку компоновки;
 #   3. Скачивает makeappx.exe (NuGet Microsoft.Windows.SDK.BuildTools),
 #      если Windows SDK не установлен;
-#   4. Собирает Doska-3.1.msix;
+#   4. Собирает Doska-3.2.msix;
 #   5. (опционально, -Sign) подписывает пакет самоподписанным сертификатом
 #      для локальной установки и теста. Для отправки в Store подпись
 #      не обязательна: Microsoft переподписывает пакет сам.
@@ -27,9 +27,9 @@ param(
 $ErrorActionPreference = "Stop"
 $storeDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 $rootDir  = Split-Path -Parent $storeDir
-$exeSrc   = Join-Path $rootDir "dist\Doska-3.1.exe"
+$exeSrc   = Join-Path $rootDir "dist\Doska-3.2.exe"
 $stage    = Join-Path $storeDir "_stage"
-$outMsix  = Join-Path $storeDir "Doska-3.1.msix"
+$outMsix  = Join-Path $storeDir "Doska-3.2.msix"
 $sdkDir   = Join-Path $storeDir "_sdk"
 
 if (-not (Test-Path $exeSrc)) { throw "Не найден $exeSrc" }
@@ -37,7 +37,7 @@ if (-not (Test-Path $exeSrc)) { throw "Не найден $exeSrc" }
 # 1. папка компоновки
 Remove-Item $stage -Recurse -Force -ErrorAction SilentlyContinue
 New-Item -ItemType Directory -Path $stage | Out-Null
-Copy-Item $exeSrc (Join-Path $stage "Doska-3.1.exe")
+Copy-Item $exeSrc (Join-Path $stage "Doska-3.2.exe")
 Copy-Item (Join-Path $storeDir "Assets") (Join-Path $stage "Assets") -Recurse
 
 $manifest = Get-Content (Join-Path $storeDir "AppxManifest.xml") -Raw

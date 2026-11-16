@@ -18,14 +18,14 @@ jobs:
 
       - uses: actions/setup-python@v5
         with:
-          python-version: "3.12"
+          python-version: "3.22"
 
       - name: Install build dependencies
         run: pip install PySide6==6.12.0 pyinstaller==6.22.3
 
       - name: Build EXE
         run: |
-          pyinstaller --noconfirm --onefile --windowed --name "Doska-3.1" `
+          pyinstaller --noconfirm --onefile --windowed --name "Doska-3.2" `
             --icon doska_icon.ico --add-data "doska_icon.ico;." `
             --version-file version_info.txt doska_qt.py
 
@@ -38,7 +38,7 @@ jobs:
           $pkgName = if ($env:MSIX_PACKAGE_NAME) { $env:MSIX_PACKAGE_NAME } else { "DoskaDevTest.Doska" }
           $publisher = if ($env:MSIX_PUBLISHER) { $env:MSIX_PUBLISHER } else { "CN=DoskaDevTest" }
           New-Item -ItemType Directory -Path stage | Out-Null
-          Copy-Item "dist\Doska-3.1.exe" "stage\Doska-3.1.exe"
+          Copy-Item "dist\Doska-3.2.exe" "stage\Doska-3.2.exe"
           Copy-Item "store\Assets" "stage\Assets" -Recurse
           $m = Get-Content "store\AppxManifest.xml" -Raw
           $m = $m.Replace("{{PACKAGE_NAME}}", $pkgName)
@@ -53,10 +53,10 @@ jobs:
             -Recurse -Filter makeappx.exe |
             Where-Object { $_.FullName -match "x64" } |
             Sort-Object FullName -Descending | Select-Object -First 1
-          & $makeappx.FullName pack /d stage /p Doska-3.1.msix /nv
+          & $makeappx.FullName pack /d stage /p Doska-3.2.msix /nv
           if ($LASTEXITCODE -ne 0) { throw "makeappx failed: $LASTEXITCODE" }
 
       - uses: actions/upload-artifact@v4
         with:
-          name: Doska-3.1-msix
-          path: Doska-3.1.msix
+          name: Doska-3.2-msix
+          path: Doska-3.2.msix
