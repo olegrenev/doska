@@ -1,10 +1,14 @@
 name: build-macos
 
-# Только ручной запуск: Actions → build-macos → Run workflow.
-# Успешная сборка появится в артефактах прогона.
+# Ручной запуск: Actions → build-macos → Run workflow.
+# После сбоя — до четырёх плановых попыток в сутки. Если ARM64-архив уже
+# опубликован, плановый запуск завершается после дешёвой проверки релиза,
+# не занимая очередь macOS-раннеров. Ручной запуск собирает заново всегда.
 
 on:
   workflow_dispatch:
+  schedule:
+    - cron: "17 3,9,15,21 * * *"
 
 permissions:
   contents: write
@@ -14,7 +18,30 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  prepare:
+    runs-on: ubuntu-latest
+    outputs:
+      needed: ${{ steps.release.outputs.needed }}
+    steps:
+      - id: release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          EVENT_NAME: ${{ github.event_name }}
+        run: |
+          needed=true
+          if [ "$EVENT_NAME" = "schedule" ]; then
+            published=$(gh release view v3.2 --repo olegrenev/doska \
+              --json assets \
+              --jq '.assets | any(.name == "Doska-3.2-macos-arm64.zip")')
+            if [ "$published" = "true" ]; then
+              needed=false
+            fi
+          fi
+          echo "needed=$needed" >> "$GITHUB_OUTPUT"
+
   build:
+    needs: prepare
+    if: needs.prepare.outputs.needed == 'true'
     runs-on: macos-15
     steps:
       - uses: actions/checkout@v4
